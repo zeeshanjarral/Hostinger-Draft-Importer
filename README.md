@@ -1,22 +1,50 @@
-# Hostinger Draft Importer — Qolvia Signature Version (Updated Logo Size)
+# Hostinger Draft Importer — Cloudflare Worker Version
 
-This version includes the approved smaller Qolvia logo in the email signature.
+This is the Cloudflare-native replacement for the previous Streamlit/Python app.
 
-## Run on macOS
+## Architecture
+
+- `public/` — static frontend (HTML/CSS/JS)
+- `src/index.js` — Cloudflare Worker API
+- Excel is parsed in the browser with SheetJS
+- The Worker connects to Hostinger IMAP over TLS on port 993
+- Drafts are created using IMAP APPEND
+- No SMTP is used, so the app does not send messages
+
+## Local setup
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-streamlit run app.py
+npm install
+npm run dev
 ```
 
-## If your venv already exists
+Then open the local URL shown by Wrangler.
+
+## Deploy
 
 ```bash
-source venv/bin/activate
-pip install -r requirements.txt
-streamlit run app.py
+npm install
+npm run deploy
 ```
 
-Test with one draft first.
+Or connect the GitHub repository to Cloudflare Workers Builds.
+
+### Cloudflare build settings
+
+Build command:
+```bash
+npm install
+```
+
+Deploy command:
+```bash
+npx wrangler deploy
+```
+
+You do not need Python or `requirements.txt` anymore.
+
+## Important
+
+Do not commit real mailbox credentials. The app asks for the email and password at runtime and sends them only to the Worker endpoint over HTTPS for that request.
+
+Test with 1–2 drafts before importing a larger sheet.
