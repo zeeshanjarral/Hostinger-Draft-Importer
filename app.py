@@ -12,28 +12,21 @@ IMAP_HOST = "imap.hostinger.com"
 IMAP_PORT = 993
 
 REQUIRED_COLUMNS = ["To", "Subject", "Body"]
-OPTIONAL_COLUMNS = ["CC", "BCC", "First Name", "Company", "Attachment"]
 
 
 def clean_cell(value):
-    """Turn empty/NaN Excel cells into empty strings."""
     if pd.isna(value):
         return ""
     return str(value).strip()
 
 
 def valid_email_list(value):
-    """
-    Basic validation for one or more addresses separated by comma or semicolon.
-    This is intentionally lightweight; the mail server remains the final authority.
-    """
     value = clean_cell(value)
     if not value:
         return True
 
     addresses = [x.strip() for x in re.split(r"[;,]", value) if x.strip()]
     pattern = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-
     return all(pattern.match(address) for address in addresses)
 
 
@@ -43,21 +36,39 @@ def connect_to_hostinger(email_address, password):
     return client
 
 
-def decode_mailbox_name(raw_name):
+def parse_mailbox_name(raw_line):
     """
-    Extract a mailbox name from a typical IMAP LIST response.
-    Examples may look like:
-    (\\HasNoChildren \\Drafts) "/" "Drafts"
+    Parse standard IMAP LIST output robustly.
+
+    Common examples:
+      (\\HasNoChildren \\Drafts) "." INBOX.Drafts
+      (\\HasNoChildren \\Drafts) "/" "INBOX/Drafts"
+      (\\HasNoChildren) "/" "Sent Messages"
     """
-    text = raw_name.decode("utf-8", errors="replace")
+    text = raw_line.decode("utf-8", errors="replace").strip()
 
-    # Last quoted item is usually the mailbox name.
-    quoted = re.findall(r'"([^"]*)"', text)
-    if quoted:
-        return quoted[-1]
+    # Everything after: ) "<delimiter>" is the mailbox name.
+    match = re.match(r'^\(.*?\)\s+(?:"[^"]*"|NIL)\s+(.+)$', text)
+    if match:
+        name = match.group(1).strip()
+        if name.startswith('"') and name.endswith('"'):
+            name = name[1:-1]
+        return name
 
-    # Fallback: take the last whitespace-delimited token.
-    return text.split()[-1].strip('"')
+    # Fallback: last token.
+    last = text.rsplit(" ", 1)[-1].strip()
+    return last.strip('"')
+
+
+def mailbox_is_selectable(client, mailbox):
+    try:
+        status, _ = client.select(mailbox, readonly=True)
+        if status == "OK":
+            client.close()
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def find_drafts_folder(client):
@@ -65,34 +76,57 @@ def find_drafts_folder(client):
     if status != "OK" or not folders:
         raise RuntimeError("Could not list mailbox folders.")
 
-    candidates = []
+    parsed = []
 
     for raw in folders:
         text = raw.decode("utf-8", errors="replace")
-        folder_name = decode_mailbox_name(raw)
+        name = parse_mailbox_name(raw)
+        parsed.append((text, name))
 
+    # Best option: server explicitly marks the folder as \Drafts.
+    for text, name in parsed:
         if "\\Drafts" in text:
-            return folder_name
+            if mailbox_is_selectable(client, name):
+                return name
 
-        if folder_name.lower() in {
+    # Next, inspect common Drafts folder names.
+    likely_names = []
+
+    for _, name in parsed:
+        lowered = name.lower()
+
+        if lowered in {
             "drafts",
             "draft",
             "inbox.drafts",
             "inbox/drafts",
+            "inbox.draft",
+            "inbox/draft",
         }:
-            candidates.append(folder_name)
+            likely_names.append(name)
+        elif lowered.endswith(".drafts") or lowered.endswith("/drafts"):
+            likely_names.append(name)
 
-    if candidates:
-        return candidates[0]
+    for name in likely_names:
+        if mailbox_is_selectable(client, name):
+            return name
 
-    # Common fallback. We verify it exists.
-    status, _ = client.select("Drafts", readonly=True)
-    if status == "OK":
-        client.close()
-        return "Drafts"
+    # Hostinger/Dovecot-style namespace fallbacks.
+    for name in [
+        "INBOX.Drafts",
+        "INBOX/Drafts",
+        "Drafts",
+        "INBOX.Draft",
+        "INBOX/Draft",
+    ]:
+        if mailbox_is_selectable(client, name):
+            return name
+
+    available = ", ".join(name for _, name in parsed)
 
     raise RuntimeError(
-        "I connected successfully, but I could not identify the Drafts folder."
+        "Connected successfully, but a writable Drafts folder could not be found. "
+        f"Available folders: {available}"
     )
 
 
@@ -103,8 +137,10 @@ def personalize(text, first_name="", company=""):
         "{{FirstName}}": clean_cell(first_name),
         "{{Company}}": clean_cell(company),
     }
+
     for key, value in replacements.items():
         text = text.replace(key, value)
+
     return text
 
 
@@ -121,10 +157,11 @@ def create_message(sender, row):
     msg = EmailMessage()
     msg["From"] = sender
     msg["To"] = to_value
+
     if cc_value:
         msg["Cc"] = cc_value
+
     if bcc_value:
-        # Keeping Bcc in a draft is useful for review before sending.
         msg["Bcc"] = bcc_value
 
     msg["Subject"] = subject
@@ -132,18 +169,21 @@ def create_message(sender, row):
     msg["Message-ID"] = make_msgid()
 
     msg.set_content(body)
+
     return msg
 
 
 def append_draft(client, drafts_folder, message):
     flags = r"(\Draft)"
     when = imaplib.Time2Internaldate(datetime.now().astimezone())
+
     status, response = client.append(
         drafts_folder,
         flags,
         when,
         message.as_bytes(),
     )
+
     if status != "OK":
         raise RuntimeError(f"Server rejected the draft: {response}")
 
@@ -152,6 +192,7 @@ def validate_dataframe(df):
     problems = []
 
     missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
+
     if missing:
         problems.append("Missing required columns: " + ", ".join(missing))
         return problems
@@ -206,7 +247,7 @@ with st.sidebar:
     password = st.text_input(
         "Mailbox password",
         type="password",
-        help="The password is used only for this running session and is not written to a file.",
+        help="Used only for the current app session.",
     )
 
     st.info(
@@ -214,6 +255,7 @@ with st.sidebar:
         "Port: 993\n\n"
         "Security: SSL"
     )
+
 
 uploaded_file = st.file_uploader(
     "Upload the Excel template",
@@ -238,13 +280,12 @@ if uploaded_file is not None:
                 "Please fix these Excel issues before importing:\n\n"
                 + "\n".join(f"- {item}" for item in problems[:30])
             )
-            if len(problems) > 30:
-                st.warning(f"There are {len(problems) - 30} more validation issues.")
         else:
             st.success("Excel file looks ready.")
 
     except Exception as exc:
         st.error(f"Could not read the Excel file: {exc}")
+
 
 st.divider()
 st.subheader("2. Test mailbox connection")
@@ -254,20 +295,25 @@ if st.button("Test Hostinger Connection", type="secondary"):
         st.error("Enter your Hostinger email address and mailbox password first.")
     else:
         client = None
+
         try:
             client = connect_to_hostinger(mailbox, password)
             drafts_folder = find_drafts_folder(client)
+
             st.success(
-                f"Connection successful. Drafts folder detected as: {drafts_folder}"
+                f"Connection successful. Actual Drafts folder: {drafts_folder}"
             )
+
         except Exception as exc:
             st.error(f"Connection failed: {exc}")
+
         finally:
             if client is not None:
                 try:
                     client.logout()
                 except Exception:
                     pass
+
 
 st.divider()
 st.subheader("3. Create drafts")
@@ -282,25 +328,32 @@ create_clicked = st.button(
     disabled=not confirmation,
 )
 
+
 if create_clicked:
     if not mailbox or not password:
         st.error("Enter your Hostinger email address and mailbox password.")
+
     elif df is None:
         st.error("Upload an Excel file first.")
+
     else:
         problems = validate_dataframe(df)
 
         if problems:
             st.error("Fix the Excel validation errors before importing.")
+
         else:
             client = None
             results = []
+
             progress = st.progress(0)
             status_box = st.empty()
 
             try:
                 client = connect_to_hostinger(mailbox, password)
                 drafts_folder = find_drafts_folder(client)
+
+                st.info(f"Saving drafts to: **{drafts_folder}**")
 
                 total = len(df)
 
@@ -314,7 +367,12 @@ if create_clicked:
 
                     try:
                         message = create_message(mailbox, row)
-                        append_draft(client, drafts_folder, message)
+
+                        append_draft(
+                            client,
+                            drafts_folder,
+                            message,
+                        )
 
                         results.append(
                             {
@@ -340,8 +398,14 @@ if create_clicked:
                     progress.progress((idx + 1) / total)
 
                 result_df = pd.DataFrame(results)
-                created = int((result_df["Status"] == "Created").sum())
-                failed = int((result_df["Status"] == "Failed").sum())
+
+                created = int(
+                    (result_df["Status"] == "Created").sum()
+                )
+
+                failed = int(
+                    (result_df["Status"] == "Failed").sum()
+                )
 
                 status_box.empty()
 
@@ -377,8 +441,8 @@ if create_clicked:
                     except Exception:
                         pass
 
+
 st.divider()
 st.caption(
-    "Tip: Test with 1–2 rows first. After you confirm the drafts appear correctly "
-    "in Hostinger Webmail, import the larger sheet."
+    "Recommended: test with one or two rows before importing a large spreadsheet."
 )
