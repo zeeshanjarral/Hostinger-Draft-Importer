@@ -1,35 +1,142 @@
-# Hostinger Draft Importer — Cloudflare Worker Version
+# Hostinger Draft Importer — Cloudflare + Python Backend
 
-This is the Cloudflare-native replacement for the previous Streamlit/Python app.
+This repository uses a hybrid architecture because Hostinger IMAP works reliably from a normal Python server, while Cloudflare Workers may reject the direct TCP destination.
 
 ## Architecture
 
-- `public/` — static frontend (HTML/CSS/JS)
-- `src/index.js` — Cloudflare Worker API
-- Excel is parsed in the browser with SheetJS
-- The Worker connects to Hostinger IMAP over TLS on port 993
-- Drafts are created using IMAP APPEND
-- No SMTP is used, so the app does not send messages
-
-## Local setup
-
-```bash
-npm install
-npm run dev
+```text
+Browser
+  |
+  v
+Cloudflare Worker + Static Frontend
+  |
+  | HTTPS /api/*
+  v
+Render / Railway FastAPI Backend
+  |
+  | IMAP SSL :993
+  v
+Hostinger Email
 ```
 
-Then open the local URL shown by Wrangler.
+The mailbox password is **not stored in GitHub**. It is sent at runtime over HTTPS to your Cloudflare Worker, which securely proxies the request to your backend. The backend uses it only for that request.
 
-## Deploy
+A shared `BACKEND_SECRET` prevents people from calling the backend API directly.
 
-```bash
-npm install
-npm run deploy
+---
+
+# Repository structure
+
+```text
+.
+├── package.json
+├── wrangler.jsonc
+├── render.yaml
+├── src/
+│   └── index.js
+├── public/
+│   ├── index.html
+│   ├── styles.css
+│   └── app.js
+└── backend/
+    ├── main.py
+    └── requirements.txt
 ```
 
-Or connect the GitHub repository to Cloudflare Workers Builds.
+---
 
-### Cloudflare build settings
+# STEP 1 — Push this repository to GitHub
+
+Replace the old Streamlit files with this project, then:
+
+```bash
+git add .
+git commit -m "Use Cloudflare frontend with Python IMAP backend"
+git push
+```
+
+You no longer need the old root-level:
+
+- `app.py`
+- `requirements.txt`
+- Streamlit configuration
+
+---
+
+# STEP 2 — Deploy the backend to Render
+
+## Option A — Render Blueprint
+
+Because this repo contains `render.yaml`, you can create a new Render Blueprint from the GitHub repo.
+
+When Render asks for `BACKEND_SECRET`, create a long random value, for example:
+
+```text
+change-this-to-a-long-random-secret
+```
+
+Use a much stronger secret in production.
+
+Render will use:
+
+- Root directory: `backend`
+- Build command: `pip install -r requirements.txt`
+- Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+- Health endpoint: `/health`
+
+After deployment, Render gives you a URL similar to:
+
+```text
+https://hostinger-draft-importer-backend.onrender.com
+```
+
+Open:
+
+```text
+https://YOUR-RENDER-URL/health
+```
+
+You should see:
+
+```json
+{
+  "ok": true,
+  "service": "hostinger-draft-importer-backend"
+}
+```
+
+## Option B — Manual Render Web Service
+
+Create a new Web Service from the same GitHub repo and use:
+
+Root Directory:
+```text
+backend
+```
+
+Build Command:
+```bash
+pip install -r requirements.txt
+```
+
+Start Command:
+```bash
+uvicorn main:app --host 0.0.0.0 --port $PORT
+```
+
+Environment variable:
+
+```text
+BACKEND_SECRET=YOUR_LONG_RANDOM_SECRET
+```
+
+---
+
+# STEP 3 — Deploy the frontend to Cloudflare
+
+Connect the same GitHub repository to Cloudflare Workers Builds.
+
+Use:
 
 Build command:
 ```bash
@@ -41,10 +148,136 @@ Deploy command:
 npx wrangler deploy
 ```
 
-You do not need Python or `requirements.txt` anymore.
+Do **not** use `pip install -r requirements.txt` on Cloudflare.
 
-## Important
+---
 
-Do not commit real mailbox credentials. The app asks for the email and password at runtime and sends them only to the Worker endpoint over HTTPS for that request.
+# STEP 4 — Add Cloudflare environment variables
 
-Test with 1–2 drafts before importing a larger sheet.
+In your Cloudflare Worker settings, add:
+
+## Variable
+
+```text
+BACKEND_URL
+```
+
+Value:
+
+```text
+https://YOUR-RENDER-BACKEND.onrender.com
+```
+
+Do not add a trailing slash.
+
+## Secret
+
+```text
+BACKEND_SECRET
+```
+
+Value:
+
+Use the **exact same secret** you configured on Render.
+
+For CLI users:
+
+```bash
+npx wrangler secret put BACKEND_SECRET
+```
+
+`BACKEND_URL` can be configured in the Cloudflare dashboard or in environment settings.
+
+Do not commit the real secret into `wrangler.jsonc`.
+
+---
+
+# STEP 5 — Redeploy Cloudflare
+
+After adding the variables/secrets, redeploy.
+
+Open your Cloudflare URL.
+
+Click:
+
+```text
+Test Hostinger Connection
+```
+
+If everything is configured correctly, you should see:
+
+```text
+Connected. Drafts folder: INBOX.Drafts
+```
+
+(or whatever your Hostinger server calls the Drafts folder).
+
+---
+
+# STEP 6 — Test one draft
+
+Create an Excel file with only one row first.
+
+Required columns:
+
+```text
+To
+Subject
+Body
+```
+
+Optional columns:
+
+```text
+CC
+BCC
+First Name
+Company
+```
+
+Personalization supported:
+
+```text
+{{First Name}}
+{{FirstName}}
+{{Company}}
+```
+
+The Qolvia signature is added automatically when the checkbox is enabled.
+
+---
+
+# Security notes
+
+- Never put your Hostinger mailbox password in GitHub.
+- Never put `BACKEND_SECRET` in GitHub.
+- Use the same `BACKEND_SECRET` on Cloudflare and Render.
+- The backend requires the secret on every `/api/*` request.
+- The frontend cannot see `BACKEND_SECRET`; only the Cloudflare Worker can.
+- Drafts are created through IMAP. This project contains no SMTP sending code.
+
+---
+
+# Railway instead of Render
+
+You can also deploy the `backend` directory to Railway.
+
+Use:
+
+Build:
+```bash
+pip install -r requirements.txt
+```
+
+Start:
+```bash
+uvicorn main:app --host 0.0.0.0 --port $PORT
+```
+
+Add:
+
+```text
+BACKEND_SECRET=YOUR_LONG_RANDOM_SECRET
+```
+
+Then use the Railway HTTPS URL as Cloudflare `BACKEND_URL`.

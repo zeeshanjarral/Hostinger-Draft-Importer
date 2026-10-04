@@ -1,5 +1,5 @@
 {
-  "name": "hostinger-draft-importer-cloudflare",
+  "name": "hostinger-draft-importer-hybrid",
   "version": "1.0.0",
   "private": true,
   "scripts": {

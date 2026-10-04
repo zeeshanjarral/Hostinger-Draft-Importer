@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Hostinger Draft Importer</title>
+  <meta name="description" content="Create Hostinger email drafts from an Excel spreadsheet.">
   <link rel="stylesheet" href="/styles.css">
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 </head>
@@ -13,16 +14,17 @@
       <div>
         <span class="eyebrow">Qolvia Email Tool</span>
         <h1>Hostinger Draft Importer</h1>
-        <p>Upload an Excel sheet and create email drafts directly in your Hostinger mailbox.</p>
+        <p>Upload an Excel file and create messages directly inside your Hostinger Drafts folder.</p>
       </div>
-      <div class="badge">Drafts only</div>
+      <span class="badge">Drafts only</span>
     </section>
 
     <section class="card grid-two">
       <div>
         <label for="email">Hostinger email</label>
-        <input id="email" type="email" placeholder="contact@yourdomain.com" autocomplete="username">
+        <input id="email" type="email" placeholder="you@yourdomain.com" autocomplete="username">
       </div>
+
       <div>
         <label for="password">Mailbox password</label>
         <input id="password" type="password" placeholder="••••••••••••" autocomplete="current-password">
@@ -45,10 +47,10 @@
       <div class="section-head">
         <div>
           <h2>Upload Excel</h2>
-          <p>Required columns: To, Subject, Body</p>
+          <p>Required columns: <strong>To</strong>, <strong>Subject</strong>, <strong>Body</strong></p>
         </div>
         <label class="file-btn">
-          Choose .xlsx file
+          Choose Excel file
           <input id="fileInput" type="file" accept=".xlsx,.xls">
         </label>
       </div>
@@ -102,6 +104,10 @@
           <tbody></tbody>
         </table>
       </div>
+
+      <button id="downloadResults" class="secondary hidden" style="margin-top:16px;">
+        Download Results CSV
+      </button>
     </section>
   </main>
 

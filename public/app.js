@@ -1,6 +1,7 @@
 let rows = [];
-let lastResults = [];
+let allResults = [];
 
+const BATCH_SIZE = 25;
 const $ = (id) => document.getElementById(id);
 
 function showNotice(message, type) {
@@ -29,10 +30,9 @@ function validateRows(data) {
   }
 
   for (const name of required) {
-    if (!(name in data[0])) {
-      issues.push(`Missing required column: ${name}`);
-    }
+    if (!(name in data[0])) issues.push(`Missing required column: ${name}`);
   }
+
   if (issues.length) return issues;
 
   data.forEach((row, i) => {
@@ -48,13 +48,13 @@ function renderPreview() {
   const table = $("previewTable");
   const thead = table.querySelector("thead");
   const tbody = table.querySelector("tbody");
-
   thead.innerHTML = "";
   tbody.innerHTML = "";
 
   if (!rows.length) return;
 
   const columns = Object.keys(rows[0]);
+
   const trh = document.createElement("tr");
   columns.forEach(c => {
     const th = document.createElement("th");
@@ -78,13 +78,12 @@ function renderResults(results) {
   const table = $("resultsTable");
   const thead = table.querySelector("thead");
   const tbody = table.querySelector("tbody");
-
   thead.innerHTML = "";
   tbody.innerHTML = "";
 
   if (!results.length) return;
 
-  const columns = ["row", "to", "subject", "status", "error"];
+  const columns = ["excel_row", "to", "subject", "status", "error"];
   const labels = ["Excel Row", "To", "Subject", "Status", "Error"];
 
   const trh = document.createElement("tr");
@@ -106,6 +105,33 @@ function renderResults(results) {
   });
 }
 
+function downloadCSV() {
+  if (!allResults.length) return;
+
+  const columns = ["excel_row", "to", "subject", "status", "error"];
+  const escapeCell = (v) => {
+    const s = String(v ?? "");
+    return `"${s.replaceAll('"', '""')}"`;
+  };
+
+  const csv = [
+    columns.join(","),
+    ...allResults.map(r => columns.map(c => escapeCell(r[c])).join(","))
+  ].join("\n");
+
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "hostinger_draft_import_results.csv";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+$("downloadResults").addEventListener("click", downloadCSV);
+
 $("includeSignature").addEventListener("change", () => {
   $("signaturePreview").style.opacity = $("includeSignature").checked ? "1" : ".35";
 });
@@ -113,9 +139,13 @@ $("includeSignature").addEventListener("change", () => {
 $("fileInput").addEventListener("change", async (e) => {
   hideNotice();
   rows = [];
+  allResults = [];
   renderPreview();
+  renderResults([]);
+  $("downloadResults").classList.add("hidden");
 
   const file = e.target.files?.[0];
+
   if (!file) {
     $("fileMeta").textContent = "No file selected.";
     return;
@@ -127,12 +157,17 @@ $("fileInput").addEventListener("change", async (e) => {
     const buffer = await file.arrayBuffer();
     const workbook = XLSX.read(buffer, { type: "array" });
     const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
-    rows = XLSX.utils.sheet_to_json(firstSheet, { defval: "" });
+
+    rows = XLSX.utils.sheet_to_json(firstSheet, {
+      defval: "",
+      raw: false
+    });
 
     $("fileMeta").textContent = `${file.name} — ${rows.length} row(s) detected`;
     renderPreview();
 
     const issues = validateRows(rows);
+
     if (issues.length) {
       showNotice(issues.slice(0, 30).join("\n"), "error");
     } else {
@@ -148,11 +183,11 @@ $("testBtn").addEventListener("click", async () => {
   const password = $("password").value;
 
   if (!email || !password) {
-    setConnection("Enter email and mailbox password first.", false);
+    setConnection("Enter your Hostinger email and mailbox password first.", false);
     return;
   }
 
-  setConnection("Testing…");
+  setConnection("Testing connection…");
 
   try {
     const res = await fetch("/api/test", {
@@ -165,7 +200,7 @@ $("testBtn").addEventListener("click", async () => {
 
     if (!res.ok) throw new Error(data.error || "Connection failed.");
 
-    setConnection(`Connected. Drafts folder: ${data.draftsFolder}`, true);
+    setConnection(`Connected. Drafts folder: ${data.drafts_folder}`, true);
   } catch (err) {
     setConnection(err.message || String(err), false);
   }
@@ -193,47 +228,74 @@ $("importBtn").addEventListener("click", async () => {
   $("importBtn").disabled = true;
   $("progressWrap").classList.remove("hidden");
   $("summary").classList.add("hidden");
-  $("progressBar").style.width = "30%";
-  $("progressText").textContent = `Uploading ${rows.length} row(s) to the Worker…`;
+  $("downloadResults").classList.add("hidden");
+
+  allResults = [];
+  renderResults([]);
+
+  const totalBatches = Math.ceil(rows.length / BATCH_SIZE);
+  let draftsFolder = "";
 
   try {
-    const res = await fetch("/api/import", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        email,
-        password,
-        includeSignature: $("includeSignature").checked,
-        rows
-      })
-    });
+    for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
+      const start = batchIndex * BATCH_SIZE;
+      const batch = rows.slice(start, start + BATCH_SIZE);
 
-    $("progressBar").style.width = "85%";
-    $("progressText").textContent = "Finalizing results…";
+      const percentBefore = Math.round((batchIndex / totalBatches) * 100);
+      $("progressBar").style.width = `${percentBefore}%`;
+      $("progressText").textContent =
+        `Creating batch ${batchIndex + 1} of ${totalBatches} (${start + 1}-${start + batch.length} of ${rows.length})…`;
 
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Import failed.");
+      const res = await fetch("/api/import", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          email,
+          password,
+          include_signature: $("includeSignature").checked,
+          row_offset: start,
+          rows: batch
+        })
+      });
 
-    lastResults = data.results || [];
-    renderResults(lastResults);
+      const data = await res.json();
 
-    const created = lastResults.filter(x => x.status === "Created").length;
-    const failed = lastResults.filter(x => x.status === "Failed").length;
+      if (!res.ok) {
+        throw new Error(data.error || `Batch ${batchIndex + 1} failed.`);
+      }
 
-    $("progressBar").style.width = "100%";
+      draftsFolder = data.drafts_folder || draftsFolder;
+      allResults.push(...(data.results || []));
+      renderResults(allResults);
+
+      const percentAfter = Math.round(((batchIndex + 1) / totalBatches) * 100);
+      $("progressBar").style.width = `${percentAfter}%`;
+    }
+
+    const created = allResults.filter(x => x.status === "Created").length;
+    const failed = allResults.filter(x => x.status === "Failed").length;
+
     $("progressText").textContent = "Finished.";
 
     const summary = $("summary");
     summary.textContent =
-      `Drafts folder: ${data.draftsFolder} — ${created} created, ${failed} failed.`;
+      `Drafts folder: ${draftsFolder || "Detected"} — ${created} created, ${failed} failed.`;
     summary.classList.remove("hidden");
 
+    if (allResults.length) {
+      $("downloadResults").classList.remove("hidden");
+    }
+
   } catch (err) {
-    $("progressBar").style.width = "100%";
-    $("progressText").textContent = "Failed.";
+    $("progressText").textContent = "Import stopped.";
+
     const summary = $("summary");
     summary.textContent = err.message || String(err);
     summary.classList.remove("hidden");
+
+    if (allResults.length) {
+      $("downloadResults").classList.remove("hidden");
+    }
   } finally {
     $("importBtn").disabled = !$("confirm").checked;
   }
