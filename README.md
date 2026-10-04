@@ -1,10 +1,6 @@
-# Hostinger Draft Importer — Fixed Version
+# Hostinger Draft Importer — Qolvia Signature Version (Updated Logo Size)
 
-This version fixes Hostinger/Dovecot Drafts-folder namespaces such as:
-
-- INBOX.Drafts
-- INBOX/Drafts
-- Drafts
+This version includes the approved smaller Qolvia logo in the email signature.
 
 ## Run on macOS
 
@@ -15,13 +11,12 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Run on Windows
+## If your venv already exists
 
-```bat
-python -m venv venv
-venv\Scripts\activate
+```bash
+source venv/bin/activate
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Test the connection first. The app should display the exact Drafts folder detected on the server.
+Test with one draft first.

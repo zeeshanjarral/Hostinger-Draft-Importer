@@ -3,6 +3,7 @@ import re
 from datetime import datetime
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
+from html import escape
 
 import pandas as pd
 import streamlit as st
@@ -11,7 +12,34 @@ import streamlit as st
 IMAP_HOST = "imap.hostinger.com"
 IMAP_PORT = 993
 
+QOLVIA_LOGO_URL = "https://i.ibb.co/DgG0df6q/download.png"
+
 REQUIRED_COLUMNS = ["To", "Subject", "Body"]
+
+
+SIGNATURE_HTML = f"""
+<div style="font-family: Arial, Helvetica, sans-serif; color:#111111; margin-top:24px;">
+  <div style="margin-bottom:12px;">
+    <img src="{QOLVIA_LOGO_URL}"
+         alt="Qolvia"
+         style="display:block; width:150px; max-width:100%; height:auto; border:0;">
+  </div>
+
+  <div style="font-family: Georgia, 'Times New Roman', serif; font-size:22px; line-height:1.15;">
+    <strong>Samuel F.</strong><br>
+    <strong>CTO | Qolvia</strong><br>
+    <em style="font-size:20px;">
+      We help businesses build, grow, and automate their online presence.
+    </em>
+  </div>
+
+  <div style="font-family: Georgia, 'Times New Roman', serif; font-size:19px; line-height:1.35; margin-top:18px;">
+    <a href="mailto:contact@qolvia.io">contact@qolvia.io</a><br>
+    <a href="https://qolvia.io">https://qolvia.io</a><br>
+    6900 Boulevard Décarie, Montréal, QC, Canada
+  </div>
+</div>
+"""
 
 
 def clean_cell(value):
@@ -37,17 +65,8 @@ def connect_to_hostinger(email_address, password):
 
 
 def parse_mailbox_name(raw_line):
-    """
-    Parse standard IMAP LIST output robustly.
-
-    Common examples:
-      (\\HasNoChildren \\Drafts) "." INBOX.Drafts
-      (\\HasNoChildren \\Drafts) "/" "INBOX/Drafts"
-      (\\HasNoChildren) "/" "Sent Messages"
-    """
     text = raw_line.decode("utf-8", errors="replace").strip()
 
-    # Everything after: ) "<delimiter>" is the mailbox name.
     match = re.match(r'^\(.*?\)\s+(?:"[^"]*"|NIL)\s+(.+)$', text)
     if match:
         name = match.group(1).strip()
@@ -55,7 +74,6 @@ def parse_mailbox_name(raw_line):
             name = name[1:-1]
         return name
 
-    # Fallback: last token.
     last = text.rsplit(" ", 1)[-1].strip()
     return last.strip('"')
 
@@ -83,13 +101,11 @@ def find_drafts_folder(client):
         name = parse_mailbox_name(raw)
         parsed.append((text, name))
 
-    # Best option: server explicitly marks the folder as \Drafts.
     for text, name in parsed:
         if "\\Drafts" in text:
             if mailbox_is_selectable(client, name):
                 return name
 
-    # Next, inspect common Drafts folder names.
     likely_names = []
 
     for _, name in parsed:
@@ -111,7 +127,6 @@ def find_drafts_folder(client):
         if mailbox_is_selectable(client, name):
             return name
 
-    # Hostinger/Dovecot-style namespace fallbacks.
     for name in [
         "INBOX.Drafts",
         "INBOX/Drafts",
@@ -132,6 +147,7 @@ def find_drafts_folder(client):
 
 def personalize(text, first_name="", company=""):
     text = clean_cell(text)
+
     replacements = {
         "{{First Name}}": clean_cell(first_name),
         "{{FirstName}}": clean_cell(first_name),
@@ -144,10 +160,28 @@ def personalize(text, first_name="", company=""):
     return text
 
 
-def create_message(sender, row):
+def plain_text_to_html(text):
+    escaped = escape(text)
+    paragraphs = escaped.split("\n")
+    return "<br>".join(paragraphs)
+
+
+def signature_plain_text():
+    return (
+        "Samuel F.\n"
+        "CTO | Qolvia\n"
+        "We help businesses build, grow, and automate their online presence.\n\n"
+        "contact@qolvia.io\n"
+        "https://qolvia.io\n"
+        "6900 Boulevard Décarie, Montréal, QC, Canada"
+    )
+
+
+def create_message(sender, row, include_signature=True):
     to_value = clean_cell(row.get("To", ""))
     cc_value = clean_cell(row.get("CC", ""))
     bcc_value = clean_cell(row.get("BCC", ""))
+
     first_name = clean_cell(row.get("First Name", ""))
     company = clean_cell(row.get("Company", ""))
 
@@ -168,7 +202,25 @@ def create_message(sender, row):
     msg["Date"] = formatdate(localtime=True)
     msg["Message-ID"] = make_msgid()
 
-    msg.set_content(body)
+    plain_body = body
+
+    if include_signature:
+        plain_body += "\n\n" + signature_plain_text()
+
+    msg.set_content(plain_body)
+
+    html_body = f"""
+    <html>
+      <body>
+        <div style="font-family: Arial, Helvetica, sans-serif; font-size:15px; line-height:1.6; color:#111111;">
+          {plain_text_to_html(body)}
+        </div>
+        {"<br>" + SIGNATURE_HTML if include_signature else ""}
+      </body>
+    </html>
+    """
+
+    msg.add_alternative(html_body, subtype="html")
 
     return msg
 
@@ -250,6 +302,11 @@ with st.sidebar:
         help="Used only for the current app session.",
     )
 
+    include_signature = st.checkbox(
+        "Automatically add Qolvia signature",
+        value=True,
+    )
+
     st.info(
         "IMAP server: imap.hostinger.com\n\n"
         "Port: 993\n\n"
@@ -288,7 +345,16 @@ if uploaded_file is not None:
 
 
 st.divider()
-st.subheader("2. Test mailbox connection")
+st.subheader("2. Signature preview")
+
+if include_signature:
+    st.markdown(SIGNATURE_HTML, unsafe_allow_html=True)
+else:
+    st.info("Signature is disabled for this import.")
+
+
+st.divider()
+st.subheader("3. Test mailbox connection")
 
 if st.button("Test Hostinger Connection", type="secondary"):
     if not mailbox or not password:
@@ -316,7 +382,7 @@ if st.button("Test Hostinger Connection", type="secondary"):
 
 
 st.divider()
-st.subheader("3. Create drafts")
+st.subheader("4. Create drafts")
 
 confirmation = st.checkbox(
     "I understand this will add draft messages to my Hostinger mailbox."
@@ -366,7 +432,11 @@ if create_clicked:
                     )
 
                     try:
-                        message = create_message(mailbox, row)
+                        message = create_message(
+                            mailbox,
+                            row,
+                            include_signature=include_signature,
+                        )
 
                         append_draft(
                             client,
@@ -380,6 +450,7 @@ if create_clicked:
                                 "To": recipient,
                                 "Subject": clean_cell(row.get("Subject", "")),
                                 "Status": "Created",
+                                "Signature": "Yes" if include_signature else "No",
                                 "Error": "",
                             }
                         )
@@ -391,6 +462,7 @@ if create_clicked:
                                 "To": recipient,
                                 "Subject": clean_cell(row.get("Subject", "")),
                                 "Status": "Failed",
+                                "Signature": "Yes" if include_signature else "No",
                                 "Error": str(row_exc),
                             }
                         )
@@ -444,5 +516,6 @@ if create_clicked:
 
 st.divider()
 st.caption(
-    "Recommended: test with one or two rows before importing a large spreadsheet."
+    "Recommended: test with one draft first and confirm the logo and signature "
+    "display correctly in Hostinger Webmail before importing the full spreadsheet."
 )
